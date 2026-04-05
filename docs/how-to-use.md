@@ -1,6 +1,6 @@
 # How to Use Mixtape
 
-Mixtape is an Elixir/OTP gateway that lets Claude Code (or any Anthropic-compatible client) talk to local MLX-LM models running on your Mac. Point your client at `localhost:4000` and it handles the rest -- spawning model processes, translating between API schemas, and streaming responses.
+Mixtape is an Elixir/OTP gateway that lets Claude Code (or any Anthropic-compatible client) talk to local MLX-LM models running on your Mac. Point your client at `localhost:4000` and it handles the rest -- monitoring model availability, translating between API schemas, and streaming responses.
 
 ## Prerequisites
 
@@ -32,26 +32,42 @@ cd mixtape
 mix deps.get
 ```
 
-## Starting the Server
+## Starting the MLX-LM Servers
+
+Mixtape does not spawn model processes -- you start them yourself. This gives you full control over which models to load and when.
+
+Start one or both models before launching Mixtape:
+
+```bash
+# Start the coder model (port 8080)
+mlx_lm.server --model ~/models/qwen2.5-coder-32b-q8 --port 8080 --host 127.0.0.1
+
+# Start the architect model (port 8081) -- optional
+mlx_lm.server --model ~/models/qwen2.5-72b-q6 --port 8081 --host 127.0.0.1
+```
+
+You can run just one model if you prefer. Mixtape will return a clear `503` error for any model that isn't running.
+
+## Starting Mixtape
 
 ```bash
 iex -S mix
 ```
 
-On startup, Mixtape does the following:
+On startup, Mixtape:
 
-1. Spawns two MLX-LM model processes (coder on port 8080, architect on port 8081)
-2. Starts an HTTP server on port 4000
-3. Polls each model's health endpoint every 2 seconds until it responds
+1. Starts an HTTP server on port 4000
+2. Begins health-checking both model endpoints every 5 seconds
+3. Reports model availability as they come online or go offline
 
-You'll see log messages as each model comes online:
+You'll see log messages as each model is detected:
 
 ```
-[info] Model coder is ready on port 8080
-[info] Model architect is ready on port 8081
+[info] Model coder is now up on port 8080
+[info] Model architect is now up on port 8081
 ```
 
-Wait for both "ready" messages before sending requests. If you send a request while a model is still loading, you'll get a `503` response.
+If a model isn't running, Mixtape will keep polling and detect it when you start it later. Requests to unavailable models get a `503` response with a message indicating which model is down.
 
 ## Using with Claude Code
 
@@ -145,11 +161,12 @@ curl -X POST http://localhost:4000/v1/messages \
 
 ## Health Check
 
-Verify the server is running:
+Verify the server is running and check model availability:
 
 ```bash
 curl http://localhost:4000/health
-# Returns: 200 ok
+# Returns JSON with per-model status:
+# {"status":"ok","models":{"coder":{"name":"coder","port":8080,"status":"up"},"architect":{"name":"architect","port":8081,"status":"down"}}}
 ```
 
 ## Stopping the Server
@@ -160,17 +177,21 @@ In the `iex` session, press `Ctrl+C` twice, or type:
 System.stop()
 ```
 
-This will cleanly shut down both model processes and the HTTP server.
+This will cleanly shut down the HTTP server and health checkers. You'll need to stop your MLX-LM server processes separately (Ctrl+C in their terminals).
 
 ## Troubleshooting
 
 ### Models return 503
 
-The model is still loading. Wait for the "ready" log message. Large models like the 72B can take a few minutes to load into memory.
+The MLX-LM server for that model isn't running or hasn't finished loading. Check:
 
-### Model process crashes
+- Is the `mlx_lm.server` process running for that model?
+- Has it finished loading? Large models like the 72B can take a few minutes to load into memory.
+- Check the health endpoint: `curl localhost:4000/health` to see which models are up/down.
 
-Check the logs for error messages. Common causes:
+### MLX-LM server won't start
+
+Common causes:
 
 - **Wrong model path** -- verify the model exists at `~/models/<name>`
 - **Not enough RAM** -- the 72B model needs significant memory. Close other applications.
@@ -192,6 +213,6 @@ To change ports, edit `lib/mixtape/application.ex` and update the port values.
 
 ### Claude Code can't connect
 
-- Make sure Mixtape is running and both models are ready
+- Make sure Mixtape is running and at least one model is up (check `/health`)
 - Verify the env vars are set: `echo $ANTHROPIC_BASE_URL` should show `http://localhost:4000`
 - Check that `ANTHROPIC_API_KEY` is set to any non-empty value (e.g., `local`)

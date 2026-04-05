@@ -24,6 +24,15 @@ defmodule Mixtape.StreamForwarderTest do
       assert StreamForwarder.parse_sse_event("") == :skip
       assert StreamForwarder.parse_sse_event("   ") == :skip
     end
+
+    test "returns :skip for malformed JSON instead of crashing" do
+      assert StreamForwarder.parse_sse_event("data: {not valid json}") == :skip
+      assert StreamForwarder.parse_sse_event("data: <<<") == :skip
+    end
+
+    test "returns :skip when no data: prefix line exists" do
+      assert StreamForwarder.parse_sse_event("event: ping") == :skip
+    end
   end
 
   describe "extract_events/1" do

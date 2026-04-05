@@ -5,37 +5,41 @@ defmodule Mixtape.RouterTest do
 
   describe "route_by_model/1" do
     test "routes coder to port 8080" do
-      {url, atom} = Mixtape.Router.route_by_model("coder")
+      {:ok, url, atom} = Mixtape.Router.route_by_model("coder")
       assert url == "http://127.0.0.1:8080"
       assert atom == :coder
     end
 
     test "routes architect to port 8081" do
-      {url, atom} = Mixtape.Router.route_by_model("architect")
+      {:ok, url, atom} = Mixtape.Router.route_by_model("architect")
       assert url == "http://127.0.0.1:8081"
       assert atom == :architect
     end
 
-    test "defaults unknown model to coder" do
-      {url, atom} = Mixtape.Router.route_by_model("unknown")
+    test "defaults nil model to coder" do
+      {:ok, url, atom} = Mixtape.Router.route_by_model(nil)
       assert url == "http://127.0.0.1:8080"
       assert atom == :coder
+    end
+
+    test "returns error for unknown model" do
+      assert {:error, :unknown_model, "gpt-4"} = Mixtape.Router.route_by_model("gpt-4")
     end
   end
 
   describe "GET /health" do
-    test "returns 200 ok" do
+    test "returns 200 with JSON model statuses" do
       conn = conn(:get, "/health")
       conn = Mixtape.Router.call(conn, Mixtape.Router.init([]))
       assert conn.status == 200
-      assert conn.resp_body == "ok"
+      body = Jason.decode!(conn.resp_body)
+      assert body["status"] == "ok"
+      assert is_map(body["models"])
     end
   end
 
   describe "POST /v1/messages" do
     test "returns 503 when model is not ready" do
-      # The app supervisor already starts :coder in :loading state
-      # (mlx_lm isn't available in the test environment)
       conn =
         conn(:post, "/v1/messages", %{"model" => "coder", "messages" => []})
         |> put_req_header("content-type", "application/json")
@@ -46,6 +50,20 @@ defmodule Mixtape.RouterTest do
       body = Jason.decode!(conn.resp_body)
       assert body["type"] == "error"
       assert body["error"]["type"] == "overloaded_error"
+    end
+
+    test "returns 400 for unknown model" do
+      conn =
+        conn(:post, "/v1/messages", %{"model" => "gpt-4", "messages" => []})
+        |> put_req_header("content-type", "application/json")
+
+      conn = Mixtape.Router.call(conn, Mixtape.Router.init([]))
+
+      assert conn.status == 400
+      body = Jason.decode!(conn.resp_body)
+      assert body["type"] == "error"
+      assert body["error"]["type"] == "invalid_request_error"
+      assert body["error"]["message"] =~ "gpt-4"
     end
   end
 
@@ -61,7 +79,19 @@ defmodule Mixtape.RouterTest do
       body = Jason.decode!(conn.resp_body)
       assert body["error"]["type"] == "server_error"
       assert body["error"]["code"] == "service_unavailable"
-      assert body["error"]["message"] == "Model is still loading"
+    end
+
+    test "returns 400 for unknown model in OpenAI format" do
+      conn =
+        conn(:post, "/v1/chat/completions", %{"model" => "gpt-4", "messages" => []})
+        |> put_req_header("content-type", "application/json")
+
+      conn = Mixtape.Router.call(conn, Mixtape.Router.init([]))
+
+      assert conn.status == 400
+      body = Jason.decode!(conn.resp_body)
+      assert body["error"]["type"] == "invalid_request_error"
+      assert body["error"]["code"] == "model_not_found"
     end
   end
 

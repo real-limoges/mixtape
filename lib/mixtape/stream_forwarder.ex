@@ -13,12 +13,16 @@ defmodule Mixtape.StreamForwarder do
 
     emit_events(conn, Translator.envelope_start(model))
 
+    # Process dictionary is used for SSE buffer and stop reason because Req's
+    # `into:` callback only allows returning {req, resp} — no custom accumulator.
     Process.put(:sse_buffer, "")
     Process.put(:last_stop_reason, "end_turn")
 
     try do
       Req.post!(upstream_url <> "/v1/chat/completions",
         json: body,
+        receive_timeout: 300_000,
+        connect_options: [timeout: 5_000],
         into: fn {:data, data}, {req, resp} ->
           buffer = Process.get(:sse_buffer, "") <> data
           {events, remainder} = extract_events(buffer)
@@ -42,7 +46,15 @@ defmodule Mixtape.StreamForwarder do
       )
     rescue
       e ->
-        Logger.error("Upstream request failed: #{inspect(e)}")
+        Logger.error("Upstream request failed: #{Exception.message(e)}")
+
+        emit_events(conn, [
+          %{
+            type: "content_block_delta",
+            index: 0,
+            delta: %{type: "text_delta", text: "\n\n[Upstream error: #{Exception.message(e)}]"}
+          }
+        ])
     end
 
     stop_reason = Process.get(:last_stop_reason, "end_turn")
@@ -71,6 +83,8 @@ defmodule Mixtape.StreamForwarder do
     try do
       Req.post!(upstream_url <> "/v1/chat/completions",
         json: body,
+        receive_timeout: 300_000,
+        connect_options: [timeout: 5_000],
         into: fn {:data, data}, {req, resp} ->
           buffer = Process.get(:sse_buffer, "") <> data
           {events, remainder} = extract_events(buffer)
@@ -90,7 +104,7 @@ defmodule Mixtape.StreamForwarder do
       )
     rescue
       e ->
-        Logger.error("Upstream request failed: #{inspect(e)}")
+        Logger.error("Upstream request failed: #{Exception.message(e)}")
     end
 
     Process.delete(:sse_buffer)
@@ -121,7 +135,14 @@ defmodule Mixtape.StreamForwarder do
           :done
 
         "data: " <> json ->
-          Jason.decode!(json)
+          case Jason.decode(json) do
+            {:ok, parsed} ->
+              parsed
+
+            {:error, _} ->
+              Logger.warning("Malformed SSE JSON: #{inspect(json)}")
+              :skip
+          end
       end
     end
   end

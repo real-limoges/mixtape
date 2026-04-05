@@ -26,7 +26,8 @@ defmodule Mixtape.MixProject do
       {:plug, "~> 1.16"},
       {:jason, "~> 1.4"},
       {:req, "~> 0.5"},
-      {:dialyxir, "~> 1.4", only: [:dev], runtime: false}
+      {:dialyxir, "~> 1.4", only: [:dev], runtime: false},
+      {:bypass, "~> 2.1", only: :test}
     ]
   end
 end

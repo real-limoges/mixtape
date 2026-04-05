@@ -2,7 +2,7 @@ defmodule Mixtape.ModelServer do
   use GenServer
   require Logger
 
-  defstruct [:name, :port, :model_path, :cmd, :os_port, :wait_for, status: :loading]
+  defstruct [:name, :port, :url, status: :down, health_interval: 5_000]
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: opts[:name])
@@ -10,80 +10,55 @@ defmodule Mixtape.ModelServer do
 
   def ready?(name) do
     GenServer.call(name, :ready?)
+  catch
+    :exit, _ -> false
+  end
+
+  def status(name) do
+    GenServer.call(name, :status)
+  catch
+    :exit, _ -> %{name: name, status: :not_configured}
   end
 
   @impl true
   def init(opts) do
-    state = struct(__MODULE__, opts)
-    {:ok, state, {:continue, :spawn_model}}
-  end
+    state = %__MODULE__{
+      name: opts[:name],
+      port: opts[:port],
+      url: "http://127.0.0.1:#{opts[:port]}",
+      health_interval: opts[:health_interval] || 5_000
+    }
 
-  @impl true
-  def handle_continue(:spawn_model, %{wait_for: nil} = state) do
-    {:noreply, do_spawn(state)}
-  end
-
-  def handle_continue(:spawn_model, %{wait_for: dep} = state) do
-    Logger.info("Model #{state.name} waiting for #{dep} to be ready before loading")
-    Process.send_after(self(), :check_dependency, 2_000)
-    {:noreply, state}
+    Process.send_after(self(), :health_check, 0)
+    {:ok, state}
   end
 
   @impl true
   def handle_call(:ready?, _from, state) do
-    {:reply, state.status == :ready, state}
+    {:reply, state.status == :up, state}
   end
 
-  @impl true
-  def handle_info(:check_dependency, %{wait_for: dep} = state) do
-    {dep_url, _} = Mixtape.Router.route_by_model(Atom.to_string(dep))
-
-    case Req.get("#{dep_url}/v1/models") do
-      {:ok, %{status: 200}} ->
-        Logger.info("Model #{dep} is ready, now loading #{state.name}")
-        {:noreply, do_spawn(state)}
-
-      _ ->
-        Process.send_after(self(), :check_dependency, 2_000)
-        {:noreply, state}
-    end
-  end
-
-  def handle_info(:health_check, %{status: :ready} = state) do
-    {:noreply, state}
+  def handle_call(:status, _from, state) do
+    {:reply, %{name: state.name, port: state.port, status: state.status}, state}
   end
 
   @impl true
   def handle_info(:health_check, state) do
-    case Req.get("http://127.0.0.1:#{state.port}/v1/models") do
-      {:ok, %{status: 200}} ->
-        Logger.info("Model #{state.name} is ready on port #{state.port}")
-        {:noreply, %{state | status: :ready}}
+    new_status =
+      case Req.get("#{state.url}/v1/models",
+             receive_timeout: 3_000,
+             connect_options: [timeout: 2_000],
+             retry: false
+           ) do
+        {:ok, %{status: 200}} -> :up
+        _ -> :down
+      end
 
-      _ ->
-        Process.send_after(self(), :health_check, 2_000)
-        {:noreply, state}
+    if new_status != state.status do
+      Logger.info("Model #{state.name} is now #{new_status} on port #{state.port}")
     end
-  end
 
-  def handle_info({_port, {:exit_status, code}}, state) do
-    Logger.error("Model #{state.name} exited with code #{code}")
-    {:stop, :model_crashed, state}
-  end
-
-  def handle_info({_port, {:data, data}}, state) do
-    Logger.debug("[#{state.name}] #{data}")
-    {:noreply, state}
-  end
-
-  defp do_spawn(state) do
-    cmd = state.cmd || mlx_cmd(state)
-    os_port = Port.open({:spawn, cmd}, [:binary, :exit_status])
-    Process.send_after(self(), :health_check, 2_000)
-    %{state | os_port: os_port}
-  end
-
-  defp mlx_cmd(%{model_path: path, port: port}) do
-    "mlx_lm.server --model #{path} --port #{port} --host 127.0.0.1"
+    Process.send_after(self(), :health_check, state.health_interval)
+    {:noreply, %{state | status: new_status}}
   end
 end
